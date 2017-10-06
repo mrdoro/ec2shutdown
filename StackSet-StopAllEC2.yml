@@ -9,8 +9,9 @@ Metadata:
           default: "AWS Lambda parameters"
         Parameters:
           - LambdaTimeout
-          - LambdaSourceS3Bucket
-          - LambdaFunctionZipName
+          - LambdaMemory
+          - SdTimer
+
 Parameters:
   LambdaTimeout:
     Type: Number
@@ -20,13 +21,17 @@ Parameters:
     Type: Number
     Default: '128'
     Description: Enter the amount of memory alocated for the lambda function. Default is 128.
+  SdTimer:
+    Type: String
+    Default: cron(0 22 * * ? *)
+    Description: Enter a shutdown time in cron format.
 
 Resources:
   EventsRule:
     Type: AWS::Events::Rule
     Properties:
       Description: Events rule for stop all EC2 at given time.
-      ScheduleExpression: cron(0 22 * * ? *)
+      ScheduleExpression: !Ref SdTimer
       Name:
         Fn::Sub: "${AWS::StackName}-EC2StopRule"
       State: ENABLED
