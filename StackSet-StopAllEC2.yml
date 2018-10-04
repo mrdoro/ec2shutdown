@@ -1,6 +1,6 @@
 ---
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Stop all ec2 instance at specified time. Implement over CloudFormation and StackSets.
+Description: Stop all ec2 instance at specified time.
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
@@ -9,9 +9,8 @@ Metadata:
           default: "AWS Lambda parameters"
         Parameters:
           - LambdaTimeout
-          - LambdaMemory
-          - SdTimer
-
+          - LambdaSourceS3Bucket
+          - LambdaFunctionZipName
 Parameters:
   LambdaTimeout:
     Type: Number
@@ -21,19 +20,15 @@ Parameters:
     Type: Number
     Default: '128'
     Description: Enter the amount of memory alocated for the lambda function. Default is 128.
-  SdTimer:
-    Type: String
-    Default: cron(0 22 * * ? *)
-    Description: Enter a shutdown time in cron format.
 
 Resources:
   EventsRule:
     Type: AWS::Events::Rule
     Properties:
       Description: Events rule for stop all EC2 at given time.
-      ScheduleExpression: !Ref SdTimer
+      ScheduleExpression: cron(0 22 * * ? *)
       Name:
-        Fn::Sub: "${AWS::StackName}-EC2StopRule"
+        Fn::Sub: "${AWS::Region}-EC2StopRule"
       State: ENABLED
       Targets:
       - Arn:
@@ -54,30 +49,50 @@ Resources:
 
           def lambda_handler(event, context):
 
-              ec2 = boto3.resource('ec2')
-              instancelist= []
+              ec2client = boto3.client('ec2')
+              #Get all spot requests
+              spot_response = ec2client.describe_spot_instance_requests()
 
-              #List all running instances
-              instances = ec2.instances.filter(
-                  Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
-              #Seperate all instance.id of running instances
-              for instance in instances:
-                  instancelist.append(instance.id)
+              #List of spot request ids
+              spot_requests_to_cancel = []
+              for request in spot_response['SpotInstanceRequests']:
+                spot_requests_to_cancel.append(request['SpotInstanceRequestId'])
 
-          #Stop All runnint instances
-              ec2.instances.filter(InstanceIds=instancelist).stop()
+              #Cancelling spot requests
+              if (len(spot_requests_to_cancel)) > 0:
+                ec2client.cancel_spot_instance_requests(SpotInstanceRequestIds=spot_requests_to_cancel)
+
+              #Get all EC2 instances
+              response = ec2client.describe_instances()
+              #List of spot instances that must be terminated instead of stopped
+              instances_to_terminate = []
+
+              for reservation in response["Reservations"]:
+                for instance in reservation["Instances"]:
+                  instance_id = instance['InstanceId']
+                  #List of instances to stop
+                  instances_to_stop = []
+                  instances_to_stop.append(instance_id)
+                  try:
+                    ec2client.stop_instances(InstanceIds=instances_to_stop)
+                  except Exception as error:
+                    if error.message.find('is a spot instance'):
+                      instances_to_terminate.append(instance_id)
+
+              if len(instances_to_terminate) > 0:
+                ec2client.terminate_instances(InstanceIds=instances_to_terminate)
 
       Handler: index.lambda_handler
       Role:
         Fn::GetAtt:
-        - MGMTEC2StopRole
+        - EC2Stop
         - Arn
       Runtime: python2.7
       Timeout:
         Ref: LambdaTimeout
       MemorySize:
         Ref: LambdaMemory
-  MGMTEC2StopRole:
+  EC2Stop:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -89,10 +104,10 @@ Resources:
             - lambda.amazonaws.com
           Action: sts:AssumeRole
       RoleName:
-        Fn::Sub: "${AWS::StackName}-MGMTEC2StopPol"
-  MGMTEC2StopPol:
+        Fn::Sub: "${AWS::Region}-StopEC2"
+  EC2StopPol:
     Type: AWS::IAM::Policy
-    DependsOn: MGMTEC2StopRole
+    DependsOn: EC2Stop
     Properties:
       PolicyDocument:
         Version: '2012-10-17'
@@ -113,9 +128,9 @@ Resources:
           Resource:
           - "*"
       PolicyName:
-        Fn::Sub: "${AWS::StackName}-MGMTEC2StopPol"
+        Fn::Sub: "${AWS::Region}-StopEc2"
       Roles:
-      - Ref: MGMTEC2StopRole
+      - Ref: EC2Stop
   LambdaPermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -127,18 +142,4 @@ Resources:
         Fn::GetAtt:
         - EventsRule
         - Arn
-Outputs:
-  EventsRule:
-    Value:
-      Ref: EventsRule
-    Export:
-      Name:
-        Fn::Sub: "${AWS::StackName}-EC2StopMonitorRule"
-    Description: Event Rule ID.
-  LambdaFuncName:
-    Value:
-      Ref: EC2StopLambda
-    Export:
-      Name:
-        Fn::Sub: "${AWS::StackName}-EC2StopMonitorLambda"
-    Description: Lambda function logical ID.
+#Outputs:
